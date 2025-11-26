@@ -1,54 +1,12 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, EmailStr
 
-# ========== AUTH ==========
+class UserCreate(BaseModel):
+    email: EmailStr
 
-class RequestOtp(BaseModel):
-    email: str
-
-
-class VerifyOtp(BaseModel):
-    email: str
+class OTPVerify(BaseModel):
+    email: EmailStr
     otp: str
 
-
-class CredLogin(BaseModel):
-    user_id: str
-    password: str
-
-
-class TokenResponse(BaseModel):
+class Token(BaseModel):
     access_token: str
-    user: dict
-    password: Optional[str] = None
-
-
-# ========== APPOINTMENTS ==========
-
-class AppointmentCreate(BaseModel):
-    patient_name: str
-    email: Optional[str] = None
-    doctor_name: str
-    appointment_date: str
-    appointment_time: str
-    message: Optional[str] = None
-
-
-class AppointmentOut(BaseModel):
-    id: int
-    user_id: str
-    patient_name: str
-    email: str
-    doctor_name: str
-    appointment_date: str
-    appointment_time: str
-    message: str
-    status: str
-    created_at: str
-
-
-# ========== ADMIN LOGIN ==========
-
-class AdminLogin(BaseModel):
-    username: str
-    password: str
+    token_type: str = "bearer"
