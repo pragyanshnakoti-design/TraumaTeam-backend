@@ -5,3 +5,4 @@ passlib[bcrypt]
 SQLAlchemy
 sendgrid
 python-multipart
+email-validator
