@@ -3,17 +3,25 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-MAIL_FROM = os.getenv("MAIL_FROM")
 
-def send_email(to, subject, body):
+def send_otp_email(email: str, otp: str):
+    """
+    Send OTP email using SendGrid API
+    """
+    if not SENDGRID_API_KEY:
+        print(f"[DEBUG] OTP for {email}: {otp} (SENDGRID key not configured)")
+        return
+
     message = Mail(
-        from_email=MAIL_FROM,
-        to_emails=to,
-        subject=subject,
-        html_content=body,
+        from_email="no-reply@traumateam.ai",
+        to_emails=email,
+        subject="Your Trauma Team OTP Code",
+        html_content=f"<h2>Your OTP is: {otp}</h2><p>This code expires in 5 minutes.</p>",
     )
+
     try:
         sg = SendGridAPIClient(SENDGRID_API_KEY)
         sg.send(message)
+        print(f"OTP email sent to {email}")
     except Exception as e:
-        raise Exception(f"Email send error: {str(e)}")
+        print(f"[ERROR] Failed to send email → {e}")
