@@ -5,3 +5,4 @@ python-dotenv
 passlib[bcrypt]
 resend
 PyJWT
+pydantic[email]
