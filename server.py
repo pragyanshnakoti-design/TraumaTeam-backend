@@ -1,10 +1,10 @@
-# server.py - SECURE BACKEND FOR TRAUMA TEAM (PATCHED FOR PYDANTIC 2.x)
+# server.py - SECURE BACKEND FOR TRAUMA TEAM (PATCHED FOR PYDANTIC 2.x) - FIXED VERSION
 
 import os
 import random
 import re
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, Request
@@ -26,18 +26,19 @@ def _env(key: str, default=None):
         return default
     return v.strip().replace('"', '').replace("'", "")
 
-# Config
+# Config - FIXED: Allow all origins for now
 RESEND_API_KEY = _env("RESEND_API_KEY")
 RESEND_FROM = _env("RESEND_FROM", "onboarding@resend.dev")
-ADMIN_USER = _env("ADMIN_USER", "admin")
+ADMIN_USER = _env("ADMIN_USER", "admin@trauma.com")
 ADMIN_PASS = _env("ADMIN_PASS", "admin123")
 JWT_SECRET = _env("JWT_SECRET", "trauma_team_secret_key_CHANGE_IN_PRODUCTION")
 DATABASE_URL = _env("DATABASE_URL", "sqlite:///./trauma_team.db")
 OTP_EXPIRE_MINUTES = int(_env("OTP_EXPIRE_MINUTES", "5"))
-CORS_ORIGINS = _env("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080")
+# FIXED: Allow all origins for development
+CORS_ORIGINS = _env("CORS_ORIGINS", "*")
 
 # Rate limit
-RATE_LIMIT_PER_MINUTE = 10
+RATE_LIMIT_PER_MINUTE = 50  # Increased for testing
 request_counts = {}
 
 # Resend
@@ -74,7 +75,7 @@ def _send_email(to: str, subject: str, html: str):
 # Database
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
     pool_pre_ping=True
 )
 
@@ -134,6 +135,7 @@ class Payment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
+
 # --- Rate limiting middleware & helpers ---
 from fastapi import Response
 
@@ -177,8 +179,22 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     payload = decode_token(token)
-    if not payload or "user_id" not in payload:
+    if not payload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    
+    # Check for admin token first
+    if payload.get("is_admin"):
+        # Return a fake user object for admin
+        class AdminUser:
+            id = 0
+            email = "admin@trauma.com"
+            username = "admin"
+        return AdminUser()
+    
+    # Regular user token
+    if "user_id" not in payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    
     user = db.query(User).filter(User.id == payload["user_id"]).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -188,11 +204,23 @@ def get_optional_user(token: str = Depends(oauth2_scheme), db: Session = Depends
     if not token:
         return None
     payload = decode_token(token)
-    if not payload or "user_id" not in payload:
+    if not payload:
+        return None
+    
+    # Check for admin token
+    if payload.get("is_admin"):
+        class AdminUser:
+            id = 0
+            email = "admin@trauma.com"
+            username = "admin"
+        return AdminUser()
+    
+    if "user_id" not in payload:
         return None
     return db.query(User).filter(User.id == payload["user_id"]).first()
 
 def require_admin(token: str = Depends(oauth2_scheme)):
+    """FIXED: Admin authentication that works with frontend"""
     if not token:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     payload = decode_token(token)
@@ -312,13 +340,16 @@ def sanitize_html(text: Optional[str]) -> Optional[str]:
 # --- FastAPI app and CORS ---
 app = FastAPI(title="Trauma Team International API (patched)")
 
+# FIXED: Proper CORS configuration
 allowed_origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+print(f"🌐 CORS Origins: {allowed_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins or ["*"],
+    allow_origins=["*"] if "*" in allowed_origins else allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
     max_age=3600
 )
 
@@ -383,14 +414,21 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     rate_limit_check(request)
 
+    # Check if admin login
+    if payload.email == ADMIN_USER and payload.password == ADMIN_PASS:
+        token = create_token({"is_admin": True}, hours_valid=24)
+        return {"token": token, "user_id": 0, "username": "admin", "is_admin": True}
+
+    # Regular user login
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not bcrypt.verify(payload.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_token({"user_id": user.id})
     return {"token": token, "user_id": user.id, "username": user.username}
+
 # ---------------------------------------------------------
-# BOOKING ENDPOINTS
+# BOOKING ENDPOINTS - FIXED
 # ---------------------------------------------------------
 @app.post("/bookings/")
 def create_booking(
@@ -405,7 +443,7 @@ def create_booking(
         invoice_id = generate_invoice_id()
 
         new_booking = Booking(
-            user_id=current_user.id if current_user else None,
+            user_id=current_user.id if current_user and hasattr(current_user, 'id') else None,
             invoice_id=invoice_id,
             patient_name=sanitize_html(booking.patient_name),
             email=booking.email,
@@ -432,6 +470,8 @@ def create_booking(
             <p><strong>Invoice ID:</strong> {invoice_id}</p>
             <p><strong>Date:</strong> {booking.appointment_date}</p>
             <p><strong>Time:</strong> {booking.appointment_time}</p>
+            <p><strong>Status:</strong> Pending confirmation</p>
+            <p>Our team will contact you shortly.</p>
             """
         )
 
@@ -439,16 +479,19 @@ def create_booking(
             "id": new_booking.id,
             "invoice_id": invoice_id,
             "patient_name": new_booking.patient_name,
+            "email": new_booking.email,
             "doctor": new_booking.doctor,
             "appointment_date": new_booking.appointment_date,
             "appointment_time": new_booking.appointment_time,
             "status": new_booking.status,
+            "payment_status": new_booking.payment_status,
+            "message": new_booking.message
         }
 
     except Exception as e:
         print("Booking Error:", e)
         db.rollback()
-        raise HTTPException(status_code=500, detail="Booking failed")
+        raise HTTPException(status_code=500, detail=f"Booking failed: {str(e)}")
 
 
 # ---------------------------------------------------------
@@ -468,7 +511,7 @@ def process_payment(
         raise HTTPException(status_code=404, detail="Booking not found")
 
     # authorization
-    if current_user and booking.user_id and booking.user_id != current_user.id:
+    if current_user and hasattr(current_user, 'id') and booking.user_id and booking.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     try:
@@ -477,7 +520,7 @@ def process_payment(
         new_payment = Payment(
             payment_id=payment_id,
             booking_id=payment.booking_id,
-            user_id=current_user.id if current_user else None,
+            user_id=current_user.id if current_user and hasattr(current_user, 'id') else None,
             amount=payment.amount,
             card_number_last4=payment.card_number[-4:],  # only last 4 digits
             card_name=sanitize_html(payment.card_name),
@@ -497,6 +540,7 @@ def process_payment(
             <h2>💳 Payment Successful</h2>
             <p>Payment ID: <strong>{payment_id}</strong></p>
             <p>Amount: ₹{payment.amount:,.2f}</p>
+            <p>Booking #{booking.id} has been confirmed.</p>
             """
         )
 
@@ -510,11 +554,11 @@ def process_payment(
     except Exception as e:
         print("Payment Error:", e)
         db.rollback()
-        raise HTTPException(status_code=500, detail="Payment failed")
+        raise HTTPException(status_code=500, detail=f"Payment failed: {str(e)}")
 
 
 # ---------------------------------------------------------
-# CONSULTATION CONFIRM
+# CONSULTATION CONFIRM - FIXED for Admin
 # ---------------------------------------------------------
 @app.post("/consultation/confirm")
 def confirm_consultation(
@@ -529,11 +573,17 @@ def confirm_consultation(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    if current_user and booking.user_id and booking.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-    if booking.payment_status != "paid":
-        raise HTTPException(status_code=400, detail="Payment not completed")
+    # Check if current_user is admin
+    is_admin = False
+    if current_user and hasattr(current_user, 'email') and current_user.email == "admin@trauma.com":
+        is_admin = True
+    
+    # If not admin, check authorization
+    if not is_admin:
+        if current_user and hasattr(current_user, 'id') and booking.user_id and booking.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        if booking.payment_status != "paid":
+            raise HTTPException(status_code=400, detail="Payment not completed")
 
     booking.consultation_confirmed = True
     booking.status = "CONFIRMED"
@@ -541,11 +591,18 @@ def confirm_consultation(
 
     _send_email(
         booking.email,
-        "Consultation Confirmed",
-        "<h2>🎉 Your consultation is officially confirmed!</h2>"
+        "Consultation Confirmed - Trauma Team",
+        f"""
+        <h2>🎉 Your consultation is officially confirmed!</h2>
+        <p>Booking #{booking.id} has been confirmed.</p>
+        <p><strong>Doctor:</strong> {booking.doctor}</p>
+        <p><strong>Date:</strong> {booking.appointment_date}</p>
+        <p><strong>Time:</strong> {booking.appointment_time}</p>
+        <p>Please arrive 10 minutes before your scheduled time.</p>
+        """
     )
 
-    return {"status": "success", "message": "Consultation confirmed"}
+    return {"status": "success", "message": "Consultation confirmed", "booking_id": booking.id}
 
 
 # ---------------------------------------------------------
@@ -556,12 +613,16 @@ def get_user_appointments(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    bookings = (
-        db.query(Booking)
-        .filter(Booking.user_id == current_user.id)
-        .order_by(Booking.created_at.desc())
-        .all()
-    )
+    # If admin, return all appointments
+    if hasattr(current_user, 'email') and current_user.email == "admin@trauma.com":
+        bookings = db.query(Booking).order_by(Booking.created_at.desc()).all()
+    else:
+        bookings = (
+            db.query(Booking)
+            .filter(Booking.user_id == current_user.id)
+            .order_by(Booking.created_at.desc())
+            .all()
+        )
 
     output = []
 
@@ -569,20 +630,23 @@ def get_user_appointments(
         output.append({
             "id": b.id,
             "invoice_id": b.invoice_id,
-            "doctor_name": b.doctor,
+            "patient_name": b.patient_name,
+            "email": b.email,
+            "doctor": b.doctor,
             "appointment_date": b.appointment_date,
             "appointment_time": b.appointment_time,
             "message": b.message,
             "status": b.status,
             "payment_status": b.payment_status,
             "consultation_confirmed": b.consultation_confirmed,
+            "created_at": b.created_at.isoformat() if b.created_at else None
         })
 
     return {"appointments": output}
 
 
 # ---------------------------------------------------------
-# ADMIN ENDPOINTS
+# ADMIN ENDPOINTS - FIXED
 # ---------------------------------------------------------
 @app.post("/admin/login")
 def admin_login(payload: LoginRequest, request: Request):
@@ -591,21 +655,99 @@ def admin_login(payload: LoginRequest, request: Request):
     if payload.email != ADMIN_USER or payload.password != ADMIN_PASS:
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
-    token = create_token({"is_admin": True}, hours_valid=24)
-    return {"token": token}
+    token = create_token({"is_admin": True, "email": ADMIN_USER}, hours_valid=24)
+    return {
+        "token": token, 
+        "user_id": 0, 
+        "username": "admin", 
+        "email": ADMIN_USER,
+        "message": "Admin login successful"
+    }
 
 
 @app.get("/admin/bookings")
 def admin_get_bookings(_admin=Depends(require_admin), db: Session = Depends(get_db)):
     bookings = db.query(Booking).order_by(Booking.created_at.desc()).all()
-    return {"bookings": bookings}
+    
+    # Convert to list of dicts
+    bookings_list = []
+    for b in bookings:
+        bookings_list.append({
+            "id": b.id,
+            "invoice_id": b.invoice_id,
+            "patient_name": b.patient_name,
+            "email": b.email,
+            "doctor": b.doctor,
+            "appointment_date": b.appointment_date,
+            "appointment_time": b.appointment_time,
+            "message": b.message or "",
+            "status": b.status,
+            "payment_status": b.payment_status,
+            "consultation_confirmed": b.consultation_confirmed,
+            "created_at": b.created_at.isoformat() if b.created_at else None
+        })
+    
+    return {"bookings": bookings_list}
 
 
 @app.get("/admin/payments")
 def admin_get_payments(_admin=Depends(require_admin), db: Session = Depends(get_db)):
     payments = db.query(Payment).order_by(Payment.created_at.desc()).all()
-    return {"payments": payments}
+    
+    payments_list = []
+    for p in payments:
+        payments_list.append({
+            "id": p.id,
+            "payment_id": p.payment_id,
+            "booking_id": p.booking_id,
+            "amount": p.amount,
+            "card_last4": p.card_number_last4,
+            "card_name": p.card_name,
+            "status": p.status,
+            "created_at": p.created_at.isoformat() if p.created_at else None
+        })
+    
+    return {"payments": payments_list}
 
+
+# ---------------------------------------------------------
+# TEST ENDPOINTS (for debugging)
+# ---------------------------------------------------------
+@app.get("/test")
+def test_endpoint():
+    return {
+        "status": "ok",
+        "message": "Backend is running",
+        "timestamp": datetime.utcnow().isoformat(),
+        "admin_user": ADMIN_USER,
+        "cors_origins": CORS_ORIGINS
+    }
+
+@app.post("/test/booking")
+def test_create_booking(booking: BookingCreate, db: Session = Depends(get_db)):
+    """Test endpoint to create booking without auth"""
+    invoice_id = generate_invoice_id()
+    
+    new_booking = Booking(
+        invoice_id=invoice_id,
+        patient_name=booking.patient_name,
+        email=booking.email,
+        doctor=booking.doctor,
+        appointment_date=booking.appointment_date,
+        appointment_time=booking.appointment_time,
+        message=booking.message or "Test booking"
+    )
+    
+    db.add(new_booking)
+    db.commit()
+    db.refresh(new_booking)
+    
+    return {
+        "test": True,
+        "id": new_booking.id,
+        "invoice_id": invoice_id,
+        "message": "Test booking created successfully"
+    }
 
 # ---------------------------------------------------------
 # HEALTH CHECK
@@ -614,11 +756,15 @@ def admin_get_payments(_admin=Depends(require_admin), db: Session = Depends(get_
 def health():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-
 # ---------------------------------------------------------
 # RUN SERVER
 # ---------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    print("\n🚀 Starting Trauma Team API (Patched)")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("\n" + "="*50)
+    print("🚀 Starting Trauma Team API (Patched & Fixed)")
+    print(f"📁 Database: {DATABASE_URL}")
+    print(f"🌐 CORS: {CORS_ORIGINS}")
+    print(f"👑 Admin: {ADMIN_USER}")
+    print("="*50 + "\n")
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
